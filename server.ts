@@ -908,18 +908,26 @@ app.put("/api/categories/:id", authenticateAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     
+    let updatedCat: any = null;
+    
     if (isMongoConnected()) {
-      const dbCat = await CategoryModel.findOneAndUpdate({ id } as any, { $set: req.body }, { new: true } as any);
+      const dbCat: any = await CategoryModel.findOneAndUpdate({ id } as any, { $set: req.body }, { new: true } as any);
+      if (dbCat) {
+        updatedCat = dbCat.toObject ? dbCat.toObject() : dbCat;
+      }
     }
     
-    let updatedCat = null;
     try {
       const categories = readJSON(CATEGORIES_FILE, []);
       const idx = categories.findIndex((c: any) => c.id === id);
       if (idx !== -1) {
         categories[idx] = { ...categories[idx], ...req.body };
-        writeJSON(CATEGORIES_FILE, categories);
-        updatedCat = categories[idx];
+        try {
+          writeJSON(CATEGORIES_FILE, categories);
+        } catch (fsErr) {}
+        if (!updatedCat) {
+          updatedCat = categories[idx];
+        }
       }
     } catch (fsErr) {
       console.error("[LOCAL] Failed to sync category update to JSON:", fsErr);
@@ -940,16 +948,22 @@ app.delete("/api/categories/:id", authenticateAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     
+    let deleted = false;
+    
     if (isMongoConnected()) {
-      await CategoryModel.findOneAndDelete({ id } as any);
+      const dbDeleted = await CategoryModel.findOneAndDelete({ id } as any);
+      if (dbDeleted) {
+        deleted = true;
+      }
     }
     
-    let deleted = false;
     try {
       const categories = readJSON(CATEGORIES_FILE, []);
       const filtered = categories.filter((c: any) => c.id !== id);
       if (categories.length !== filtered.length) {
-        writeJSON(CATEGORIES_FILE, filtered);
+        try {
+          writeJSON(CATEGORIES_FILE, filtered);
+        } catch (fsErr) {}
         deleted = true;
       }
     } catch (fsErr) {

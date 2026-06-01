@@ -1,6 +1,9 @@
 import mongoose, { Schema } from "mongoose";
 import fs from "fs";
 import path from "path";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 // 1. Author Sub-schema definition
 const AuthorSchema = new Schema({
@@ -455,14 +458,17 @@ export async function connectDB() {
     mongoose.set("bufferCommands", false);
 
     const mongoUri = process.env.MONGODB_URI || process.env.MONGODB_URL || process.env.MONGO_URI || "mongodb://localhost:27017/arithmetica";
+    
+    // Mask credentials before logging
+    const maskedUri = mongoUri.replace(/:([^@:]+)@/, ":****@");
+    console.log(`[MONGODB] Attempting to connect to database using URI: ${maskedUri}`);
 
     try {
-      console.log(`[MONGODB] Attempting to connect to database...`);
       await mongoose.connect(mongoUri, {
         serverSelectionTimeoutMS: 5000,
       });
       isConnected = true;
-      console.log(`[MONGODB] Connected successfully to MongoDB!`);
+      console.log(`[MONGODB] Connected successfully to MongoDB (Host: ${mongoose.connection.host}, DB Name: ${mongoose.connection.name})!`);
       
       // Automatically migrate JSON backup if needed
       await syncJSONPostsToMongo();
@@ -472,7 +478,8 @@ export async function connectDB() {
       await migrateRemainingJSONs();
       return true;
     } catch (err: any) {
-      console.error(`[MONGODB] Connection failed: ${err.message || err}`);
+      console.error(`[MONGODB] Connection failed! Error: ${err.message || err}`);
+      console.error(`[MONGODB] Detailed error stack trace:`, err);
       connectionPromise = null; // Reset pointer for retries
       return false;
     }
