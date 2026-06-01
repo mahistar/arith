@@ -1137,15 +1137,6 @@ export default function AdminDashboard({
               Secure Login Entry
             </button>
           </form>
-
-          {/* Guidelines */}
-          <div className="mt-6 p-4 bg-amber-50/50 dark:bg-amber-950/10 border border-amber-200/60 dark:border-amber-900/30 text-amber-805 dark:text-amber-400 rounded text-center text-xs leading-relaxed">
-            <span className="font-bold flex items-center justify-center gap-1 mb-1 text-slate-700 dark:text-slate-300">
-              <ShieldAlert className="h-3.5 w-3.5 text-amber-500" />
-              Demo Admin Credentials:
-            </span>
-            Username: <code className="bg-amber-100 dark:bg-amber-900/50 px-1.5 py-0.5 rounded font-mono font-bold text-slate-800 dark:text-amber-300">admin</code> / Password: <code className="bg-amber-100 dark:bg-amber-900/50 px-1.5 py-0.5 rounded font-mono font-bold text-slate-800 dark:text-amber-300">admin</code>
-          </div>
         </div>
       </div>
     );

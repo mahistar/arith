@@ -1006,10 +1006,12 @@ export default function App() {
                 );
               })()}
 
+
               {/* Centered Posts Feed Column */}
               <div className="space-y-6">
                 {renderLeftArticleFeed()}
               </div>
+
 
               {/* Archive Section to filter posts by Year and Month */}
               <ArchiveSection
