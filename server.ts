@@ -174,13 +174,14 @@ async function comparePasswords(plain: string, hashOrPlain: string): Promise<boo
 }
 
 async function getAdminCredentials() {
-  const envUsername = process.env.ADMIN_USERNAME || process.env.ADMIN_USER;
-  const envPassword = process.env.ADMIN_PASSWORD || process.env.ADMIN_PASS;
+  const envUsername = process.env.ADMIN_USERNAME || process.env.ADMIN_USER || "admin";
+  const envPassword = process.env.PASSWORD_HASH || process.env.ADMIN_PASSWORD || process.env.ADMIN_PASS;
 
-  if (envUsername && envPassword) {
+  if (envPassword) {
+    const isHash = envPassword.startsWith("$2a$") || envPassword.startsWith("$2b$") || envPassword.startsWith("$2y$");
     return {
       username: envUsername,
-      passwordHash: bcrypt.hashSync(envPassword, 10),
+      passwordHash: isHash ? envPassword : bcrypt.hashSync(envPassword, 10),
       isFromEnv: true
     };
   }
@@ -204,7 +205,11 @@ async function getAdminCredentials() {
       const creds = await AdminAuthModel.findOne();
       if (creds) {
         const obj = creds.toObject();
-        writeJSON(authPath, obj);
+        try {
+          writeJSON(authPath, obj);
+        } catch (fsErr) {
+          console.error("[LOCAL] Failed to write backup auth JSON:", fsErr);
+        }
         const u = obj.username || obj.Username || "admin";
         const p = obj.passwordHash || obj.PasswordHash;
         return {
@@ -234,96 +239,134 @@ async function backupCategories() {}
 async function backupResources() {}
 async function backupComments() {}
 
-// 1. Fetch all posts via JSON (Local-First)
+// 1. Fetch all posts with MongoDB priority
 async function getAllPosts(): Promise<any[]> {
   try {
-    const posts = readJSON(POSTS_FILE, []);
-    
     if (isMongoConnected()) {
-      PostModel.countDocuments().then(async (mCount) => {
-        if (mCount !== posts.length) {
-          console.log(`[MONGO SYNC] Local posts count (${posts.length}) != MongoDB count (${mCount}). Syncing...`);
-          await PostModel.deleteMany({});
-          if (posts.length > 0) {
-            await PostModel.insertMany(posts);
-          }
-        }
-      }).catch(err => console.error("[MONGO SYNC ERROR] Failed syncing posts:", err));
+      const posts = await PostModel.find().sort({ createdAt: -1 });
+      if (posts && posts.length > 0) {
+        return posts.map(p => p.toObject ? p.toObject() : p);
+      }
     }
-    
-    return posts;
+    return readJSON(POSTS_FILE, []);
   } catch (err: any) {
-    console.error("[LOCAL db] Error fetching posts:", err);
-    return [];
+    console.error("[db] Error fetching posts:", err);
+    return readJSON(POSTS_FILE, []);
   }
 }
 
-// 2. Fetch specific post via JSON (Local-First)
+// 2. Fetch specific post with MongoDB priority
 async function getPostById(id: string): Promise<any | null> {
-  const posts = readJSON(POSTS_FILE, []);
-  const post = posts.find((p: any) => p.id === id);
-  return post || null;
+  try {
+    if (isMongoConnected()) {
+      const post = await PostModel.findOne({ id } as any);
+      if (post) return post.toObject ? post.toObject() : post;
+    }
+    const posts = readJSON(POSTS_FILE, []);
+    return posts.find((p: any) => p.id === id) || null;
+  } catch (err) {
+    console.error(`[db] Error in getPostById for ID ${id}:`, err);
+    const posts = readJSON(POSTS_FILE, []);
+    return posts.find((p: any) => p.id === id) || null;
+  }
 }
 
-// 3. Create post (Local-First)
+// 3. Create post with MongoDB priority
 async function createPost(postData: any): Promise<any> {
-  const posts = readJSON(POSTS_FILE, []);
-  posts.unshift(postData);
-  writeJSON(POSTS_FILE, posts);
-
-  if (isMongoConnected()) {
-    new PostModel(postData).save().catch(err => console.error("[MONGO SYNC] Failed to create post:", err));
+  try {
+    if (isMongoConnected()) {
+      const newPost = new PostModel(postData);
+      await newPost.save();
+    }
+  } catch (err) {
+    console.error("[MONGO SYNC] Failed to create post in MongoDB:", err);
+  }
+  
+  try {
+    const posts = readJSON(POSTS_FILE, []);
+    posts.unshift(postData);
+    writeJSON(POSTS_FILE, posts);
+  } catch (err) {
+    console.error("[LOCAL SYNC] Failed to write post to JSON backup:", err);
   }
   return postData;
 }
 
-// 4. Update post (Local-First)
+// 4. Update post with MongoDB priority
 async function updatePost(id: string, updateData: any): Promise<any | null> {
-  const posts = readJSON(POSTS_FILE, []);
-  const index = posts.findIndex((p: any) => p.id === id);
-  if (index === -1) return null;
-
-  const updated = { ...posts[index], ...updateData };
-  posts[index] = updated;
-  writeJSON(POSTS_FILE, posts);
-
-  if (isMongoConnected()) {
-    PostModel.findOneAndUpdate({ id } as any, { $set: updateData }, { new: true } as any)
-      .catch(err => console.error("[MONGO SYNC] Failed to update post:", err));
+  let updatedObj: any = null;
+  try {
+    if (isMongoConnected()) {
+      const mUpdated = await PostModel.findOneAndUpdate({ id } as any, { $set: updateData }, { new: true } as any) as any;
+      if (mUpdated) updatedObj = mUpdated.toObject ? mUpdated.toObject() : mUpdated;
+    }
+  } catch (err) {
+    console.error("[MONGO SYNC] Failed to update post in MongoDB:", err);
   }
-  return updated;
+
+  try {
+    const posts = readJSON(POSTS_FILE, []);
+    const index = posts.findIndex((p: any) => p.id === id);
+    if (index !== -1) {
+      const updated = { ...posts[index], ...updateData };
+      posts[index] = updated;
+      writeJSON(POSTS_FILE, posts);
+      if (!updatedObj) updatedObj = updated;
+    }
+  } catch (err) {
+    console.error("[LOCAL SYNC] Failed to update post in JSON backup:", err);
+  }
+  return updatedObj;
 }
 
-// 5. Delete post (Local-First)
+// 5. Delete post with MongoDB priority
 async function deletePostById(id: string): Promise<boolean> {
-  const posts = readJSON(POSTS_FILE, []);
-  const filtered = posts.filter((p: any) => p.id !== id);
-  const deleted = posts.length !== filtered.length;
-  if (deleted) {
-    writeJSON(POSTS_FILE, filtered);
-    
+  let deleted = false;
+  try {
     if (isMongoConnected()) {
-      PostModel.findOneAndDelete({ id } as any)
-        .catch(err => console.error("[MONGO SYNC] Failed to delete post:", err));
+      const res = await PostModel.findOneAndDelete({ id } as any);
+      if (res) deleted = true;
     }
+  } catch (err) {
+    console.error("[MONGO SYNC] Failed to delete post from MongoDB:", err);
+  }
+
+  try {
+    const posts = readJSON(POSTS_FILE, []);
+    const filtered = posts.filter((p: any) => p.id !== id);
+    if (posts.length !== filtered.length) {
+      writeJSON(POSTS_FILE, filtered);
+      deleted = true;
+    }
+  } catch (err) {
+    console.error("[LOCAL SYNC] Failed to delete post from JSON backup:", err);
   }
   return deleted;
 }
 
-// 6. Increment view counter (Local-First)
+// 6. Increment view counter with MongoDB priority
 async function incrementPostViews(id: string): Promise<number | null> {
-  const posts = readJSON(POSTS_FILE, []);
-  const index = posts.findIndex((p: any) => p.id === id);
-  if (index === -1) return null;
-
-  posts[index].views = (posts[index].views || 0) + 1;
-  writeJSON(POSTS_FILE, posts);
-
-  if (isMongoConnected()) {
-    PostModel.findOneAndUpdate({ id } as any, { $inc: { views: 1 } }, { new: true } as any)
-      .catch(err => console.error("[MONGO SYNC] Failed to increment views:", err));
+  try {
+    if (isMongoConnected()) {
+      const mUpdated = await PostModel.findOneAndUpdate({ id } as any, { $inc: { views: 1 } }, { new: true } as any) as any;
+      if (mUpdated) return mUpdated.views;
+    }
+  } catch (err) {
+    console.error("[MONGO SYNC] Failed to increment views in MongoDB:", err);
   }
-  return posts[index].views;
+
+  try {
+    const posts = readJSON(POSTS_FILE, []);
+    const index = posts.findIndex((p: any) => p.id === id);
+    if (index !== -1) {
+      posts[index].views = (posts[index].views || 0) + 1;
+      writeJSON(POSTS_FILE, posts);
+      return posts[index].views;
+    }
+  } catch (err) {
+    console.error("[LOCAL SYNC] Failed to increment views in JSON backup:", err);
+  }
+  return null;
 }
 
 // Global variable or constant for app environment URL fallback
@@ -498,48 +541,36 @@ const authenticateAdmin = async (req: express.Request, res: express.Response, ne
 
 // --- AUTHENTICATION API ---
 app.post("/api/auth/login", async (req, res) => {
-  const { username, password } = req.body;
+  try {
+    const { username, password } = req.body;
 
-  if (!username || !password) {
-    return res.status(400).json({ error: "দয়া করে ইউজারনেম এবং পাসওয়ার্ড প্রদান করুন।" });
-  }
-
-  const envUsername = process.env.ADMIN_USERNAME || process.env.ADMIN_USER;
-  const envPassword = process.env.ADMIN_PASSWORD || process.env.ADMIN_PASS;
-
-  let isValid = false;
-
-  // Prioritize checking environment variables directly
-  if (envUsername && envPassword) {
-    if (username === envUsername && password === envPassword) {
-      isValid = true;
+    if (!username || !password) {
+      return res.status(400).json({ error: "দয়া করে ইউজারনেম এবং পাসওয়ার্ড প্রদান করুন।" });
     }
-  }
 
-  // Fallback to local files or database credentials
-  if (!isValid) {
     const creds = await getAdminCredentials();
-    if (username === creds.username && await comparePasswords(password, creds.passwordHash)) {
-      isValid = true;
+    const isValid = username === creds.username && await comparePasswords(password, creds.passwordHash);
+
+    if (isValid) {
+      const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: "24h" });
+      return res.json({ token, username });
     }
-  }
 
-  if (isValid) {
-    const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: "24h" });
-    return res.json({ token, username });
+    return res.status(401).json({ error: "ভুল ইউজারনেম অথবা পাসওয়ার্ড! পুনরায় চেষ্টা করুন।" });
+  } catch (err: any) {
+    console.error("Login API exception:", err);
+    return res.status(500).json({ error: "লগইন প্রসেস করার সময় সার্ভারে অভ্যন্তরীণ সমস্যা হয়েছে।" });
   }
-
-  return res.status(401).json({ error: "ভুল ইউজারনেম অথবা পাসওয়ার্ড! পুনরায় চেষ্টা করুন।" });
 });
 
 // Used to check if currently stored client token is valid
 app.get("/api/auth/verify", async (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return res.json({ valid: false });
-  }
-  const token = authHeader.split(" ")[1];
   try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.json({ valid: false });
+    }
+    const token = authHeader.split(" ")[1];
     const decoded = jwt.verify(token, JWT_SECRET) as { username: string };
     const envUsername = process.env.ADMIN_USERNAME || process.env.ADMIN_USER;
     const creds = await getAdminCredentials();
@@ -556,43 +587,54 @@ app.get("/api/auth/verify", async (req, res) => {
 
 // Update Admin Username and Password (secure settings section)
 app.post("/api/auth/update-credentials", authenticateAdmin, async (req, res) => {
-  const { currentPassword, newUsername, newPassword } = req.body;
+  try {
+    const { currentPassword, newUsername, newPassword } = req.body;
 
-  if (!currentPassword) {
-    return res.status(400).json({ error: "নিরাপত্তার উদ্দেশ্যে আপনার বর্তমান পাসওয়ার্ড প্রদান করা আবশ্যক।" });
-  }
-
-  const creds = await getAdminCredentials();
-
-  // Verify current password is correct
-  if (!await comparePasswords(currentPassword, creds.passwordHash)) {
-    return res.status(401).json({ error: "বর্তমান পাসওয়ার্ডটি সঠিক নয়! পুনরায় চেষ্টা করুন।" });
-  }
-
-  let updated = false;
-  if (newUsername && newUsername.trim()) {
-    creds.username = newUsername.trim();
-    updated = true;
-  }
-  if (newPassword && newPassword.trim()) {
-    if (newPassword.trim().length < 4) {
-      return res.status(400).json({ error: "নতুন পাসওয়ার্ডটি অত্যন্ত ছোট! কমপক্ষে ৪ অক্ষরের পাসওয়ার্ড ব্যবহার করুন।" });
+    if (!currentPassword) {
+      return res.status(400).json({ error: "নিরাপত্তার উদ্দেশ্যে আপনার বর্তমান পাসওয়ার্ড প্রদান করা আবশ্যক।" });
     }
-    creds.passwordHash = bcrypt.hashSync(newPassword.trim(), 10);
-    updated = true;
-  }
 
-  if (updated) {
-    await AdminAuthModel.findOneAndUpdate(
-      {} as any,
-      { $set: { username: creds.username, passwordHash: creds.passwordHash } },
-      { upsert: true, new: true } as any
-    );
-    writeJSON(getAuthFilePath(), { username: creds.username, passwordHash: creds.passwordHash });
-    return res.json({ success: true, message: "অ্যাডমিন ক্রেডেনশিয়ালস সফলভাবে পরিবর্তন করা হয়েছে।" });
-  }
+    const creds = await getAdminCredentials();
 
-  return res.status(400).json({ error: "কোনো নতুন ইউজারনেম বা পাসওয়ার্ড প্রদান করা হয়নি।" });
+    // Verify current password is correct
+    if (!await comparePasswords(currentPassword, creds.passwordHash)) {
+      return res.status(401).json({ error: "বর্তমান পাসওয়ার্ডটি সঠিক নয়! পুনরায় চেষ্টা করুন।" });
+    }
+
+    let updated = false;
+    if (newUsername && newUsername.trim()) {
+      creds.username = newUsername.trim();
+      updated = true;
+    }
+    if (newPassword && newPassword.trim()) {
+      if (newPassword.trim().length < 4) {
+        return res.status(400).json({ error: "নতুন পাসওয়ার্ডটি অত্যন্ত ছোট! কমপক্ষে ৪ অক্ষরের পাসওয়ার্ড ব্যবহার করুন।" });
+      }
+      creds.passwordHash = bcrypt.hashSync(newPassword.trim(), 10);
+      updated = true;
+    }
+
+    if (updated) {
+      if (isMongoConnected()) {
+        await AdminAuthModel.findOneAndUpdate(
+          {} as any,
+          { $set: { username: creds.username, passwordHash: creds.passwordHash } },
+          { upsert: true, new: true } as any
+        );
+      }
+      try {
+        writeJSON(getAuthFilePath(), { username: creds.username, passwordHash: creds.passwordHash });
+      } catch (fsErr) {
+        console.error("[LOCAL] Failed to update admin auth json file:", fsErr);
+      }
+      return res.json({ success: true, message: "অ্যাডমিন ক্রেডেনশিয়ালস সফলভাবে পরিবর্তন করা হয়েছে।" });
+    }
+
+    return res.status(400).json({ error: "কোনো নতুন ইউজারনেম বা পাসওয়ার্ড প্রদান করা হয়নি।" });
+  } catch (err: any) {
+    console.error("Error in update-credentials route:", err);
+    return res.status(500).json({ error: "পাসওয়ার্ড পরিবর্তন করার সময় সার্ভারে একটি অভ্যন্তরীণ ত্রুটি তৈরি হয়েছে।" });
+  }
 });
 
 // --- POSTS API ---
@@ -789,43 +831,48 @@ app.post("/api/posts/:id/view", async (req, res) => {
 // --- CATEGORIES API ---
 app.get("/api/categories", async (req, res) => {
   try {
-    const categories = readJSON(CATEGORIES_FILE, []);
-    
-    // Non-blocking sync check
     if (isMongoConnected()) {
-      CategoryModel.countDocuments().then(async (mCount) => {
-        if (mCount !== categories.length) {
-          console.log(`[MONGO SYNC] Syncing categories. Local: ${categories.length}, Mongo: ${mCount}`);
-          await CategoryModel.deleteMany({});
-          if (categories.length > 0) {
-            await CategoryModel.insertMany(categories);
-          }
-        }
-      }).catch(err => console.error("[MONGO SYNC] Failed to sync Categories:", err));
+      const dbCategories = await CategoryModel.find().sort({ order: 1 });
+      if (dbCategories && dbCategories.length > 0) {
+        return res.json(dbCategories.map(c => c.toObject ? c.toObject() : c));
+      }
     }
-    
+    const categories = readJSON(CATEGORIES_FILE, []);
     res.json(categories);
   } catch (err: any) {
-    res.status(500).json({ error: "বিভাগ লোড করতে সমস্যা হয়েছে।" });
+    console.error("Failed to fetch categories:", err);
+    try {
+      const categories = readJSON(CATEGORIES_FILE, []);
+      return res.json(categories);
+    } catch (fsErr) {
+      res.status(500).json({ error: "বিভাগ লোড করতে সমস্যা হয়েছে।" });
+    }
   }
 });
 
 app.post("/api/categories", authenticateAdmin, async (req, res) => {
   try {
-    const categories = readJSON(CATEGORIES_FILE, []);
     const newCat = {
       ...req.body,
       id: req.body.id || `cat-${Date.now()}`
     };
-    categories.push(newCat);
-    writeJSON(CATEGORIES_FILE, categories);
     
     if (isMongoConnected()) {
-      new CategoryModel(newCat).save().catch(err => console.error("[MONGO SYNC] Failed to create Category:", err));
+      const dbCat = new CategoryModel(newCat);
+      await dbCat.save();
+    }
+    
+    try {
+      const categories = readJSON(CATEGORIES_FILE, []);
+      categories.push(newCat);
+      writeJSON(CATEGORIES_FILE, categories);
+    } catch (fsErr) {
+      console.error("[LOCAL] Failed to sync category creation to JSON:", fsErr);
     }
     
     res.status(201).json(newCat);
   } catch (err: any) {
+    console.error("Failed to create category:", err);
     res.status(500).json({ error: "নতুন বিভাগ তৈরি করতে সমস্যা হয়েছে।" });
   }
 });
@@ -833,22 +880,31 @@ app.post("/api/categories", authenticateAdmin, async (req, res) => {
 app.put("/api/categories/:id", authenticateAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const categories = readJSON(CATEGORIES_FILE, []);
-    const idx = categories.findIndex((c: any) => c.id === id);
-    if (idx === -1) {
-      return res.status(404).json({ error: "বিভাগটি খুঁজে পাওয়া যায়নি।" });
-    }
-    
-    categories[idx] = { ...categories[idx], ...req.body };
-    writeJSON(CATEGORIES_FILE, categories);
     
     if (isMongoConnected()) {
-      CategoryModel.findOneAndUpdate({ id } as any, { $set: req.body }, { new: true } as any)
-        .catch(err => console.error("[MONGO SYNC] Failed to update Category:", err));
+      const dbCat = await CategoryModel.findOneAndUpdate({ id } as any, { $set: req.body }, { new: true } as any);
     }
     
-    res.json(categories[idx]);
+    let updatedCat = null;
+    try {
+      const categories = readJSON(CATEGORIES_FILE, []);
+      const idx = categories.findIndex((c: any) => c.id === id);
+      if (idx !== -1) {
+        categories[idx] = { ...categories[idx], ...req.body };
+        writeJSON(CATEGORIES_FILE, categories);
+        updatedCat = categories[idx];
+      }
+    } catch (fsErr) {
+      console.error("[LOCAL] Failed to sync category update to JSON:", fsErr);
+    }
+    
+    if (updatedCat) {
+      res.json(updatedCat);
+    } else {
+      res.status(404).json({ error: "বিভাগটি খুঁজে পাওয়া যায়নি।" });
+    }
   } catch (err: any) {
+    console.error("Failed to update category:", err);
     res.status(500).json({ error: "বিভাগ আপডেট করতে সমস্যা হয়েছে।" });
   }
 });
@@ -856,52 +912,63 @@ app.put("/api/categories/:id", authenticateAdmin, async (req, res) => {
 app.delete("/api/categories/:id", authenticateAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const categories = readJSON(CATEGORIES_FILE, []);
-    const filtered = categories.filter((c: any) => c.id !== id);
-    if (categories.length === filtered.length) {
-      return res.status(404).json({ error: "বিভাগটি খুঁজে পাওয়া যায়নি।" });
-    }
-    
-    writeJSON(CATEGORIES_FILE, filtered);
     
     if (isMongoConnected()) {
-      CategoryModel.findOneAndDelete({ id } as any)
-        .catch(err => console.error("[MONGO SYNC] Failed to delete Category:", err));
+      await CategoryModel.findOneAndDelete({ id } as any);
     }
     
-    res.json({ success: true, message: "বিভাগটি মুছে ফেলা হয়েছে।" });
+    let deleted = false;
+    try {
+      const categories = readJSON(CATEGORIES_FILE, []);
+      const filtered = categories.filter((c: any) => c.id !== id);
+      if (categories.length !== filtered.length) {
+        writeJSON(CATEGORIES_FILE, filtered);
+        deleted = true;
+      }
+    } catch (fsErr) {
+      console.error("[LOCAL] Failed to delete category from JSON:", fsErr);
+    }
+    
+    if (deleted) {
+      res.json({ success: true, message: "বিভাগটি মুছে ফেলা হয়েছে।" });
+    } else {
+      res.status(404).json({ error: "বিভাগটি খুঁজে পাওয়া যায়নি।" });
+    }
   } catch (err: any) {
+    console.error("Failed to delete category:", err);
     res.status(500).json({ error: "বিভাগ মুছতে সমস্যা হয়েছে।" });
   }
 });
 
 // --- COMMENTS API ---
 app.get("/api/comments", async (req, res) => {
+  const { postId } = req.query;
   try {
-    const { postId } = req.query;
-    const comments = readJSON(COMMENTS_FILE, []);
-    const filtered = postId ? comments.filter((c: any) => c.postId === postId) : comments;
-    
     if (isMongoConnected()) {
-      CommentModel.countDocuments().then(async (mCount) => {
-        if (mCount !== comments.length) {
-          await CommentModel.deleteMany({});
-          if (comments.length > 0) {
-            await CommentModel.insertMany(comments);
-          }
-        }
-      }).catch(err => console.error("[MONGO SYNC] Failed to sync comments:", err));
+      const queryObj = postId ? { postId } : {};
+      const dbComments = await CommentModel.find(queryObj as any).sort({ createdAt: -1 });
+      if (dbComments && dbComments.length > 0) {
+        return res.json(dbComments.map(c => c.toObject ? c.toObject() : c));
+      }
     }
     
+    const comments = readJSON(COMMENTS_FILE, []);
+    const filtered = postId ? comments.filter((c: any) => c.postId === postId) : comments;
     res.json(filtered);
   } catch (err: any) {
-    res.status(500).json({ error: "মন্তব্য লগ লোড করতে সমস্যা হয়েছে।" });
+    console.error("Failed to fetch comments:", err);
+    try {
+      const comments = readJSON(COMMENTS_FILE, []);
+      const filtered = postId ? comments.filter((c: any) => c.postId === postId) : comments;
+      return res.json(filtered);
+    } catch (fsErr) {
+      res.status(500).json({ error: "মন্তব্য লগ লোড করতে সমস্যা হয়েছে।" });
+    }
   }
 });
 
 app.post("/api/comments", async (req, res) => {
   try {
-    const comments = readJSON(COMMENTS_FILE, []);
     const newComment = {
       ...req.body,
       id: `comment-${Date.now()}`,
@@ -912,15 +979,23 @@ app.post("/api/comments", async (req, res) => {
       }),
       createdAt: new Date().toISOString()
     };
-    comments.unshift(newComment);
-    writeJSON(COMMENTS_FILE, comments);
     
     if (isMongoConnected()) {
-      new CommentModel(newComment).save().catch(err => console.error("[MONGO SYNC] Failed to save Comment:", err));
+      const dbComment = new CommentModel(newComment);
+      await dbComment.save();
+    }
+    
+    try {
+      const comments = readJSON(COMMENTS_FILE, []);
+      comments.unshift(newComment);
+      writeJSON(COMMENTS_FILE, comments);
+    } catch (fsErr) {
+      console.error("[LOCAL] Failed to save comment to JSON:", fsErr);
     }
     
     res.status(201).json(newComment);
   } catch (err: any) {
+    console.error("Failed to make comment:", err);
     res.status(500).json({ error: "মন্তব্য প্রকাশ করতে সমস্যা হয়েছে।" });
   }
 });
@@ -939,13 +1014,22 @@ app.post("/api/subscribe", async (req, res) => {
       return res.status(400).json({ error: "অনগ্রহ করে একটি বৈধ ইমেইল ঠিকানা প্রদান করুন।" });
     }
 
-    const subscribers = readJSON(SUBSCRIBERS_FILE, []);
-    const exist = subscribers.some((sub: any) => {
-      const e = typeof sub === "string" ? sub : sub.email;
-      return e?.toLowerCase() === normalizedEmail;
-    });
+    let isSubscriberExist = false;
+    
+    if (isMongoConnected()) {
+      const existingSub = await SubscriberModel.findOne({ email: normalizedEmail } as any);
+      if (existingSub) {
+        isSubscriberExist = true;
+      }
+    } else {
+      const subscribers = readJSON(SUBSCRIBERS_FILE, []);
+      isSubscriberExist = subscribers.some((sub: any) => {
+        const e = typeof sub === "string" ? sub : sub.email;
+        return e?.toLowerCase() === normalizedEmail;
+      });
+    }
 
-    if (exist) {
+    if (isSubscriberExist) {
       return res.status(400).json({ error: "এই ইমেইল ঠিকানাটি ইতিমধ্যে সাবস্ক্রাইব করা হয়েছে।" });
     }
 
@@ -954,15 +1038,23 @@ app.post("/api/subscribe", async (req, res) => {
       email: normalizedEmail,
       subscribedAt: new Date().toISOString()
     };
-    subscribers.push(newSubscriber);
-    writeJSON(SUBSCRIBERS_FILE, subscribers);
 
     if (isMongoConnected()) {
-      new SubscriberModel({ email: normalizedEmail }).save().catch(err => console.error("[MONGO SYNC] Failed to save Subscriber:", err));
+      const dbSub = new SubscriberModel({ email: normalizedEmail });
+      await dbSub.save();
+    }
+    
+    try {
+      const subscribers = readJSON(SUBSCRIBERS_FILE, []);
+      subscribers.push(newSubscriber);
+      writeJSON(SUBSCRIBERS_FILE, subscribers);
+    } catch (fsErr) {
+      console.error("[LOCAL] Failed to write subscriber to JSON:", fsErr);
     }
 
     res.json({ success: true, message: "সাবস্ক্রিপশন সফল হয়েছে! আমাদের সাথে যুক্ত হওয়ার জন্য ধন্যবাদ।" });
   } catch (err: any) {
+    console.error("Subscribing error:", err);
     res.status(500).json({ error: "সাবস্ক্রাইব করতে সমস্যা হয়েছে।" });
   }
 });
@@ -1070,16 +1162,19 @@ app.put("/api/site-config", authenticateAdmin, async (req, res) => {
 // --- SYSTEM RESET (MAINTENANCE) ---
 app.post("/api/system/reset", authenticateAdmin, async (req, res) => {
   try {
-    await PostModel.deleteMany({});
-    await CategoryModel.deleteMany({});
-    await CommentModel.deleteMany({});
-    await SubscriberModel.deleteMany({});
-    await ResourceModel.deleteMany({});
-    await NotificationModel.deleteMany({});
-    await SiteConfigModel.deleteMany({});
-    await AdminAuthModel.deleteMany({});
-    
-    console.log("[MONGO db] Truncated all collections during system reset. Re-syncing from local backups...");
+    if (isMongoConnected()) {
+      await PostModel.deleteMany({});
+      await CategoryModel.deleteMany({});
+      await CommentModel.deleteMany({});
+      await SubscriberModel.deleteMany({});
+      await ResourceModel.deleteMany({});
+      await NotificationModel.deleteMany({});
+      await SiteConfigModel.deleteMany({});
+      await AdminAuthModel.deleteMany({});
+      console.log("[MONGO db] Truncated all collections during system reset. Re-syncing from local backups...");
+    } else {
+      console.log("[SYSTEM RESET] MongoDB not connected. Resetting local JSON files instead (not implemented/skipped).");
+    }
     
     // Automatically trigger restoration of all local JSON state backups
     await syncDatabaseFromJSONBackups();
