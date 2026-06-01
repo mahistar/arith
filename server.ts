@@ -150,6 +150,23 @@ function isMongoConnected(): boolean {
   return mongoose.connection && mongoose.connection.readyState === 1;
 }
 
+function comparePasswords(plain: string, hashOrPlain: string): boolean {
+  if (typeof hashOrPlain !== "string") return false;
+
+  const isHash = hashOrPlain.startsWith("$2a$") || hashOrPlain.startsWith("$2b$") || hashOrPlain.startsWith("$2y$");
+  if (isHash) {
+    try {
+      return bcrypt.compareSync(plain, hashOrPlain);
+    } catch (e) {
+      console.error("[AUTH] Bcrypt validation error:", e);
+      return false;
+    }
+  }
+
+  // Fallback to strict plain-text direct matching if not a bcrypt hash
+  return plain === hashOrPlain;
+}
+
 async function getAdminCredentials() {
   const envUsername = process.env.ADMIN_USERNAME || process.env.ADMIN_USER;
   const envPassword = process.env.ADMIN_PASSWORD || process.env.ADMIN_PASS;
@@ -163,9 +180,21 @@ async function getAdminCredentials() {
   }
 
   try {
-    const backupAuth = readJSON(AUTH_FILE, null);
-    if (backupAuth && backupAuth.username && backupAuth.passwordHash) {
-      return backupAuth;
+    let backupAuth = readJSON(AUTH_FILE, null);
+    if (!backupAuth) {
+      const altPath = path.join(path.dirname(AUTH_FILE), "Admin-auth.json");
+      backupAuth = readJSON(altPath, null);
+    }
+
+    if (backupAuth) {
+      const u = backupAuth.username || backupAuth.Username;
+      const p = backupAuth.passwordHash || backupAuth.PasswordHash;
+      if (u && p) {
+        return {
+          username: u,
+          passwordHash: p
+        };
+      }
     }
     
     if (isMongoConnected()) {
@@ -173,7 +202,12 @@ async function getAdminCredentials() {
       if (creds) {
         const obj = creds.toObject();
         writeJSON(AUTH_FILE, obj);
-        return obj;
+        const u = obj.username || obj.Username || "admin";
+        const p = obj.passwordHash || obj.PasswordHash;
+        return {
+          username: u,
+          passwordHash: p
+        };
       }
     }
   } catch (e) {
@@ -482,7 +516,7 @@ app.post("/api/auth/login", async (req, res) => {
   // Fallback to local files or database credentials
   if (!isValid) {
     const creds = await getAdminCredentials();
-    if (username === creds.username && bcrypt.compareSync(password, creds.passwordHash)) {
+    if (username === creds.username && comparePasswords(password, creds.passwordHash)) {
       isValid = true;
     }
   }
@@ -528,7 +562,7 @@ app.post("/api/auth/update-credentials", authenticateAdmin, async (req, res) => 
   const creds = await getAdminCredentials();
 
   // Verify current password is correct
-  if (!bcrypt.compareSync(currentPassword, creds.passwordHash)) {
+  if (!comparePasswords(currentPassword, creds.passwordHash)) {
     return res.status(401).json({ error: "বর্তমান পাসওয়ার্ডটি সঠিক নয়! পুনরায় চেষ্টা করুন।" });
   }
 

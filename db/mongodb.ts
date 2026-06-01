@@ -396,12 +396,19 @@ async function migrateRemainingJSONs() {
   try {
     const authCount = await AdminAuthModel.countDocuments();
     if (authCount === 0) {
-      const jsonPath = path.join(process.cwd(), "database", "admin-auth.json");
+      let jsonPath = path.join(process.cwd(), "database", "admin-auth.json");
+      if (!fs.existsSync(jsonPath)) {
+        jsonPath = path.join(process.cwd(), "database", "Admin-auth.json");
+      }
       if (fs.existsSync(jsonPath)) {
         const parsed = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
-        if (parsed && parsed.username && parsed.passwordHash) {
-          await AdminAuthModel.create(parsed);
-          console.log("[MONGO SEED] Admin authentication credentials migrated successfully from JSON!");
+        if (parsed) {
+          const u = parsed.username || parsed.Username;
+          const p = parsed.passwordHash || parsed.PasswordHash;
+          if (u && p) {
+            await AdminAuthModel.create({ username: u, passwordHash: p });
+            console.log("[MONGO SEED] Admin authentication credentials migrated successfully from JSON!");
+          }
         }
       }
     }
