@@ -161,6 +161,7 @@ const AdminAuthSchema = new Schema({
 export const AdminAuthModel = mongoose.models.AdminAuth || mongoose.model("AdminAuth", AdminAuthSchema);
 
 let isConnected = false;
+let connectionPromise: Promise<boolean> | null = null;
 
 // Seed defaults helpers
 async function seedDefaultConfig() {
@@ -442,28 +443,40 @@ export async function syncJSONPostsToMongo() {
 // 5. Establish connection helper to MongoDB
 export async function connectDB() {
   if (isConnected) return true;
-
-  mongoose.set("bufferCommands", false);
-
-  const mongoUri = process.env.MONGODB_URI || process.env.MONGODB_URL || process.env.MONGO_URI || "mongodb://localhost:27017/arithmetica";
-
-  try {
-    console.log(`[MONGODB] Attempting to connect to database at: ${mongoUri.replace(/:([^@:]+)@/, ":****@")}`);
-    await mongoose.connect(mongoUri, {
-      serverSelectionTimeoutMS: 5000,
-    });
+  if (mongoose.connection && mongoose.connection.readyState === 1) {
     isConnected = true;
-    console.log(`[MONGODB] Connected successfully to MongoDB!`);
-    
-    // Automatically migrate JSON backup if needed
-    await syncJSONPostsToMongo();
-    await seedDefaultConfig();
-    await seedDefaultCategories();
-    await seedDefaultResources();
-    await migrateRemainingJSONs();
     return true;
-  } catch (err: any) {
-    console.error(`[MONGODB] Connection failed: ${err.message || err}`);
-    return false;
   }
+  if (connectionPromise) {
+    return connectionPromise;
+  }
+
+  connectionPromise = (async () => {
+    mongoose.set("bufferCommands", false);
+
+    const mongoUri = process.env.MONGODB_URI || process.env.MONGODB_URL || process.env.MONGO_URI || "mongodb://localhost:27017/arithmetica";
+
+    try {
+      console.log(`[MONGODB] Attempting to connect to database...`);
+      await mongoose.connect(mongoUri, {
+        serverSelectionTimeoutMS: 5000,
+      });
+      isConnected = true;
+      console.log(`[MONGODB] Connected successfully to MongoDB!`);
+      
+      // Automatically migrate JSON backup if needed
+      await syncJSONPostsToMongo();
+      await seedDefaultConfig();
+      await seedDefaultCategories();
+      await seedDefaultResources();
+      await migrateRemainingJSONs();
+      return true;
+    } catch (err: any) {
+      console.error(`[MONGODB] Connection failed: ${err.message || err}`);
+      connectionPromise = null; // Reset pointer for retries
+      return false;
+    }
+  })();
+
+  return connectionPromise;
 }

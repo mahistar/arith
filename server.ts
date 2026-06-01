@@ -35,6 +35,27 @@ app.use("/uploads", express.static(UPLOADS_DIR));
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
+// Dynamic CORS configuration representing production rules
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization");
+  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
+// Serverless DB state-synchronizing middleware
+app.use("/api", async (req, res, next) => {
+  try {
+    await connectDB();
+  } catch (err) {
+    console.error("[SERVERLESS CONNECT FAIL]", err);
+  }
+  next();
+});
+
 // Define JSON database backup paths
 const DATABASE_DIR = path.join(process.cwd(), "database");
 const POSTS_FILE = path.join(DATABASE_DIR, "posts.json");
@@ -187,6 +208,30 @@ async function getAdminCredentials() {
   }
 
   try {
+    if (isMongoConnected()) {
+      const creds = await AdminAuthModel.findOne();
+      if (creds) {
+        const obj = creds.toObject ? creds.toObject() : creds;
+        const u = obj.username || "admin";
+        const p = obj.passwordHash;
+        if (p) {
+          // Asynchronously update local backup in case writable
+          try {
+            const authPath = getAuthFilePath();
+            writeJSON(authPath, obj);
+          } catch (fsErr) {}
+          return {
+            username: u,
+            passwordHash: p
+          };
+        }
+      }
+    }
+  } catch (e) {
+    console.error("[MONGO AUTH] Failed checking MongoDB for admin credentials:", e);
+  }
+
+  try {
     const authPath = getAuthFilePath();
     const backupAuth = readJSON(authPath, null);
 
@@ -200,26 +245,8 @@ async function getAdminCredentials() {
         };
       }
     }
-    
-    if (isMongoConnected()) {
-      const creds = await AdminAuthModel.findOne();
-      if (creds) {
-        const obj = creds.toObject();
-        try {
-          writeJSON(authPath, obj);
-        } catch (fsErr) {
-          console.error("[LOCAL] Failed to write backup auth JSON:", fsErr);
-        }
-        const u = obj.username || obj.Username || "admin";
-        const p = obj.passwordHash || obj.PasswordHash;
-        return {
-          username: u,
-          passwordHash: p
-        };
-      }
-    }
   } catch (e) {
-    console.error("[LOCAL AUTH] Failed checking MongoDB for admin credentials:", e);
+    console.error("[LOCAL AUTH] Failed checking JSON backup for admin credentials:", e);
   }
   
   return {
@@ -1062,6 +1089,12 @@ app.post("/api/subscribe", async (req, res) => {
 // --- ADMIN EMAIL SUBSCRIBERS MANAGEMENT API ---
 app.get("/api/admin/subscribers", authenticateAdmin, async (req, res) => {
   try {
+    if (isMongoConnected()) {
+      const dbSubs = await SubscriberModel.find();
+      if (dbSubs && dbSubs.length > 0) {
+        return res.json(dbSubs.map((s: any) => s.email));
+      }
+    }
     const subscribers = readJSON(SUBSCRIBERS_FILE, []);
     res.json(subscribers.map((s: any) => typeof s === "string" ? s : s.email));
   } catch (err: any) {
@@ -1073,22 +1106,27 @@ app.delete("/api/admin/subscribers/:email", authenticateAdmin, async (req, res) 
   try {
     const { email } = req.params;
     const targetEmail = decodeURIComponent(email).trim().toLowerCase();
+    let deletedFromMongo = false;
     
+    if (isMongoConnected()) {
+      const deletedDoc = await SubscriberModel.findOneAndDelete({ email: targetEmail } as any);
+      if (deletedDoc) deletedFromMongo = true;
+    }
+
     const subscribers = readJSON(SUBSCRIBERS_FILE, []);
     const filtered = subscribers.filter((s: any) => {
       const emailVal = typeof s === "string" ? s : s.email;
       return emailVal?.toLowerCase() !== targetEmail;
     });
     
-    if (subscribers.length === filtered.length) {
+    if (!deletedFromMongo && subscribers.length === filtered.length) {
       return res.status(404).json({ error: "সাবস্ক্রাইবার তালিকাভুক্ত তথ্য পাওয়া যায়নি।" });
     }
 
-    writeJSON(SUBSCRIBERS_FILE, filtered);
-
-    if (isMongoConnected()) {
-      SubscriberModel.findOneAndDelete({ email: targetEmail } as any)
-        .catch(err => console.error("[MONGO SYNC] Failed to delete Subscriber:", err));
+    try {
+      writeJSON(SUBSCRIBERS_FILE, filtered);
+    } catch (fsErr) {
+      console.error("[LOCAL] Failed to delete subscriber from JSON file:", fsErr);
     }
 
     res.json({ success: true, message: "সাবস্ক্রাইবার সফলভাবে তালিকা থেকে অপসারিত করা হয়েছে।" });
@@ -1099,6 +1137,12 @@ app.delete("/api/admin/subscribers/:email", authenticateAdmin, async (req, res) 
 
 app.get("/api/admin/notifications", authenticateAdmin, async (req, res) => {
   try {
+    if (isMongoConnected()) {
+      const dbNotifications = await NotificationModel.find().sort({ createdAt: -1 }).limit(50);
+      if (dbNotifications && dbNotifications.length > 0) {
+        return res.json(dbNotifications.map(n => n.toObject ? n.toObject() : n));
+      }
+    }
     const notifications = readJSON(NOTIFICATIONS_FILE, []);
     res.json(notifications.slice(0, 50));
   } catch (err: any) {
@@ -1109,6 +1153,13 @@ app.get("/api/admin/notifications", authenticateAdmin, async (req, res) => {
 // --- SITE CONFIG API ---
 app.get("/api/site-config", async (req, res) => {
   try {
+    if (isMongoConnected()) {
+      const dbConfig = await SiteConfigModel.findOne({ id: "site-config" } as any);
+      if (dbConfig) {
+        return res.json(dbConfig.toObject ? dbConfig.toObject() : dbConfig);
+      }
+    }
+    
     let config = readJSON(CONFIG_FILE, null);
     if (!config || !config.siteName) {
       config = {
@@ -1134,7 +1185,9 @@ app.get("/api/site-config", async (req, res) => {
         typography: "serif-academic",
         primaryThemeColor: "gold"
       };
-      writeJSON(CONFIG_FILE, config);
+      try {
+        writeJSON(CONFIG_FILE, config);
+      } catch (fsErr) {}
     }
     res.json(config);
   } catch (err: any) {
@@ -1144,17 +1197,27 @@ app.get("/api/site-config", async (req, res) => {
 
 app.put("/api/site-config", authenticateAdmin, async (req, res) => {
   try {
-    const config = readJSON(CONFIG_FILE, {});
-    const updatedConfig = { ...config, ...req.body, id: "site-config" };
-    writeJSON(CONFIG_FILE, updatedConfig);
-    
+    let updatedConfigVal = null;
     if (isMongoConnected()) {
-      SiteConfigModel.findOneAndUpdate({ id: "site-config" } as any, { $set: req.body }, { new: true, upsert: true } as any)
-        .catch(err => console.error("[MONGO SYNC] Failed to update SiteConfig:", err));
+      const mUpdated = await SiteConfigModel.findOneAndUpdate(
+        { id: "site-config" } as any,
+        { $set: req.body },
+        { new: true, upsert: true } as any
+      ) as any;
+      if (mUpdated) updatedConfigVal = mUpdated.toObject ? mUpdated.toObject() : mUpdated;
     }
     
-    res.json(updatedConfig);
+    const config = readJSON(CONFIG_FILE, {});
+    const updatedConfig = { ...config, ...req.body, id: "site-config" };
+    try {
+      writeJSON(CONFIG_FILE, updatedConfig);
+    } catch (fsErr) {
+      console.error("[LOCAL] Failed to update site config file backup:", fsErr);
+    }
+    
+    res.json(updatedConfigVal || updatedConfig);
   } catch (err: any) {
+    console.error("Failed to update site configuration:", err);
     res.status(500).json({ error: "সাইট কনফিগারেশন সংরক্ষণ করতে সমস্যা হয়েছে।" });
   }
 });
@@ -1255,22 +1318,16 @@ const uploadResource = multer({
 
 app.get("/api/resources", async (req, res) => {
   try {
-    const resources = readJSON(RESOURCES_FILE, []);
-    
-    // Sync Resources to MongoDB in background if connected
     if (isMongoConnected()) {
-      ResourceModel.countDocuments().then(async (mCount) => {
-        if (mCount !== resources.length) {
-          await ResourceModel.deleteMany({});
-          if (resources.length > 0) {
-            await ResourceModel.insertMany(resources);
-          }
-        }
-      }).catch(err => console.error("[MONGO SYNC] Failed to sync Resources:", err));
+      const dbResources = await ResourceModel.find().sort({ uploadedAt: -1 });
+      if (dbResources && dbResources.length > 0) {
+        return res.json(dbResources.map(r => r.toObject ? r.toObject() : r));
+      }
     }
-    
+    const resources = readJSON(RESOURCES_FILE, []);
     res.json(resources);
   } catch (error) {
+    console.error("Failed to read academic resources:", error);
     res.status(500).json({ error: "Failed to read academic resources catalogue" });
   }
 });
@@ -1333,17 +1390,21 @@ app.post("/api/resources", authenticateAdmin, async (req, res) => {
       uploader: uploader || "Arithmetica Admin"
     };
 
-    const resources = readJSON(RESOURCES_FILE, []);
-    resources.unshift(newResource);
-    writeJSON(RESOURCES_FILE, resources);
-    
-    // Sync to Mongo asynchronously
     if (isMongoConnected()) {
-      new ResourceModel(newResource).save().catch(err => console.error("[MONGO SYNC] Failed to save Resource:", err));
+      await new ResourceModel(newResource).save();
+    }
+    
+    try {
+      const resources = readJSON(RESOURCES_FILE, []);
+      resources.unshift(newResource);
+      writeJSON(RESOURCES_FILE, resources);
+    } catch (fsErr) {
+      console.error("[LOCAL] Failed to write resource backup to JSON file:", fsErr);
     }
     
     res.status(201).json(newResource);
   } catch (error) {
+    console.error("Failed to create resource entry:", error);
     res.status(500).json({ error: "Failed to write new resource entry" });
   }
 });
@@ -1353,12 +1414,6 @@ app.put("/api/resources/:id", authenticateAdmin, async (req, res) => {
     const { id } = req.params;
     const { title, description, category, fileUrl, fileName, fileSize, fileType, uploader } = req.body;
     
-    const resources = readJSON(RESOURCES_FILE, []);
-    const idx = resources.findIndex((r: any) => r.id === id);
-    if (idx === -1) {
-      return res.status(404).json({ error: "Resource item not found" });
-    }
-
     // Convert bytes to readable format if size is a number
     let readableSize = fileSize;
     if (typeof fileSize === "number") {
@@ -1380,17 +1435,30 @@ app.put("/api/resources/:id", authenticateAdmin, async (req, res) => {
     if (fileType !== undefined) updateObj.fileType = fileType;
     if (uploader !== undefined) updateObj.uploader = uploader;
 
-    resources[idx] = { ...resources[idx], ...updateObj };
-    writeJSON(RESOURCES_FILE, resources);
-
-    // Sync to Mongo asynchronously
+    let updatedFromMongo = null;
     if (isMongoConnected()) {
-      ResourceModel.findOneAndUpdate({ id } as any, { $set: updateObj }, { new: true } as any)
-        .catch(err => console.error("[MONGO SYNC] Failed to update Resource:", err));
+      const mUpdated = await ResourceModel.findOneAndUpdate({ id } as any, { $set: updateObj }, { new: true } as any) as any;
+      if (mUpdated) updatedFromMongo = mUpdated.toObject ? mUpdated.toObject() : mUpdated;
+    }
+
+    const resources = readJSON(RESOURCES_FILE, []);
+    const idx = resources.findIndex((r: any) => r.id === id);
+    if (!updatedFromMongo && idx === -1) {
+      return res.status(404).json({ error: "Resource item not found" });
+    }
+
+    if (idx !== -1) {
+      resources[idx] = { ...resources[idx], ...updateObj };
+      try {
+        writeJSON(RESOURCES_FILE, resources);
+      } catch (fsErr) {
+        console.error("[LOCAL] Failed to write resource backup updates:", fsErr);
+      }
     }
     
-    res.json(resources[idx]);
+    res.json(updatedFromMongo || (idx !== -1 ? resources[idx] : null));
   } catch (error) {
+    console.error("Failed to update resource entry:", error);
     res.status(500).json({ error: "Failed to update resource info" });
   }
 });
@@ -1398,22 +1466,28 @@ app.put("/api/resources/:id", authenticateAdmin, async (req, res) => {
 app.delete("/api/resources/:id", authenticateAdmin, async (req, res) => {
   try {
     const { id } = req.params;
+    let deletedFromMongo = false;
+    
+    if (isMongoConnected()) {
+      const deletedDoc = await ResourceModel.findOneAndDelete({ id } as any);
+      if (deletedDoc) deletedFromMongo = true;
+    }
+
     const resources = readJSON(RESOURCES_FILE, []);
     const filtered = resources.filter((r: any) => r.id !== id);
-    if (resources.length === filtered.length) {
+    if (!deletedFromMongo && resources.length === filtered.length) {
       return res.status(404).json({ error: "Resource item not found" });
     }
 
-    writeJSON(RESOURCES_FILE, filtered);
-
-    // Sync to Mongo asynchronously
-    if (isMongoConnected()) {
-      ResourceModel.findOneAndDelete({ id } as any)
-        .catch(err => console.error("[MONGO SYNC] Failed to delete Resource:", err));
+    try {
+      writeJSON(RESOURCES_FILE, filtered);
+    } catch (fsErr) {
+      console.error("[LOCAL] Failed to delete resource backup entry:", fsErr);
     }
     
     res.json({ success: true, message: "Resource entry deleted from index successfully" });
   } catch (error) {
+    console.error("Failed to delete resource entry:", error);
     res.status(500).json({ error: "Failed to delete from resources index" });
   }
 });
@@ -1421,33 +1495,42 @@ app.delete("/api/resources/:id", authenticateAdmin, async (req, res) => {
 app.get("/api/resources/download/:id", async (req, res) => {
   try {
     const { id } = req.params;
+    let resourceInfo: any = null;
+    
+    if (isMongoConnected()) {
+      const dbResource: any = await ResourceModel.findOneAndUpdate({ id } as any, { $inc: { downloadCount: 1 } }, { new: true } as any);
+      if (dbResource) {
+        resourceInfo = dbResource.toObject ? dbResource.toObject() : dbResource;
+      }
+    }
+
     const resources = readJSON(RESOURCES_FILE, []);
     const idx = resources.findIndex((r: any) => r.id === id);
-    if (idx === -1) {
+    if (!resourceInfo && idx === -1) {
       return res.status(404).json({ error: "Resource not found" });
     }
-    
-    // Increment downloadCount
-    resources[idx].downloadCount = (resources[idx].downloadCount || 0) + 1;
-    writeJSON(RESOURCES_FILE, resources);
 
-    // Sync to Mongo asynchronously
-    if (isMongoConnected()) {
-      ResourceModel.findOneAndUpdate({ id } as any, { $inc: { downloadCount: 1 } }, { new: true } as any)
-        .catch(err => console.error("[MONGO SYNC] Failed to increment resource downloadCount:", err));
+    if (idx !== -1) {
+      resources[idx].downloadCount = (resources[idx].downloadCount || 0) + 1;
+      try {
+        writeJSON(RESOURCES_FILE, resources);
+      } catch (fsErr) {}
+      if (!resourceInfo) {
+        resourceInfo = resources[idx];
+      }
     }
-
+    
     // Read directory safe filename logic
-    const filenameOnDisk = path.basename(resources[idx].fileUrl);
+    const filenameOnDisk = path.basename(resourceInfo.fileUrl);
     const filePath = path.join(UPLOADS_DIR, filenameOnDisk);
     
     if (fs.existsSync(filePath)) {
-      res.download(filePath, resources[idx].fileName || filenameOnDisk);
+      res.download(filePath, resourceInfo.fileName || filenameOnDisk);
     } else {
-      // Direct redirect fallback if we are dealing with external files or lost disk states
-      res.redirect(resources[idx].fileUrl);
+      res.redirect(resourceInfo.fileUrl);
     }
   } catch (e) {
+    console.error("Failed to process resource download link:", e);
     res.status(500).json({ error: "Failed to process resource download link" });
   }
 });
