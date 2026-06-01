@@ -438,7 +438,7 @@ export async function connectDB() {
 
   mongoose.set("bufferCommands", false);
 
-  const mongoUri = process.env.MONGODB_URI || process.env.MONGO_URI || "mongodb://localhost:27017/arithmetica";
+  const mongoUri = process.env.MONGODB_URI || process.env.MONGODB_URL || process.env.MONGO_URI || "mongodb://localhost:27017/arithmetica";
 
   try {
     console.log(`[MONGODB] Attempting to connect to database at: ${mongoUri.replace(/:([^@:]+)@/, ":****@")}`);

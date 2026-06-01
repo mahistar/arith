@@ -151,6 +151,17 @@ function isMongoConnected(): boolean {
 }
 
 async function getAdminCredentials() {
+  const envUsername = process.env.ADMIN_USERNAME || process.env.ADMIN_USER;
+  const envPassword = process.env.ADMIN_PASSWORD || process.env.ADMIN_PASS;
+
+  if (envUsername && envPassword) {
+    return {
+      username: envUsername,
+      passwordHash: bcrypt.hashSync(envPassword, 10),
+      isFromEnv: true
+    };
+  }
+
   try {
     const backupAuth = readJSON(AUTH_FILE, null);
     if (backupAuth && backupAuth.username && backupAuth.passwordHash) {
@@ -170,8 +181,8 @@ async function getAdminCredentials() {
   }
   
   return {
-    username: process.env.ADMIN_USERNAME || "admin",
-    passwordHash: bcrypt.hashSync(process.env.ADMIN_PASSWORD || "admin", 10)
+    username: "admin",
+    passwordHash: bcrypt.hashSync("admin", 10)
   };
 }
 
@@ -434,8 +445,11 @@ const authenticateAdmin = async (req: express.Request, res: express.Response, ne
   const token = authHeader.split(" ")[1];
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as { username: string };
+    const envUsername = process.env.ADMIN_USERNAME || process.env.ADMIN_USER;
     const creds = await getAdminCredentials();
-    if (decoded && decoded.username === creds.username) {
+    const currentAdminUsername = envUsername || creds.username;
+    
+    if (decoded && decoded.username === currentAdminUsername) {
       next();
     } else {
       res.status(403).json({ error: "এই পাতায় প্রবেশের জন্য আপনার যথাযথ অনুমতি নেই।" });
@@ -453,8 +467,27 @@ app.post("/api/auth/login", async (req, res) => {
     return res.status(400).json({ error: "দয়া করে ইউজারনেম এবং পাসওয়ার্ড প্রদান করুন।" });
   }
 
-  const creds = await getAdminCredentials();
-  if (username === creds.username && bcrypt.compareSync(password, creds.passwordHash)) {
+  const envUsername = process.env.ADMIN_USERNAME || process.env.ADMIN_USER;
+  const envPassword = process.env.ADMIN_PASSWORD || process.env.ADMIN_PASS;
+
+  let isValid = false;
+
+  // Prioritize checking environment variables directly
+  if (envUsername && envPassword) {
+    if (username === envUsername && password === envPassword) {
+      isValid = true;
+    }
+  }
+
+  // Fallback to local files or database credentials
+  if (!isValid) {
+    const creds = await getAdminCredentials();
+    if (username === creds.username && bcrypt.compareSync(password, creds.passwordHash)) {
+      isValid = true;
+    }
+  }
+
+  if (isValid) {
     const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: "24h" });
     return res.json({ token, username });
   }
@@ -471,8 +504,11 @@ app.get("/api/auth/verify", async (req, res) => {
   const token = authHeader.split(" ")[1];
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as { username: string };
+    const envUsername = process.env.ADMIN_USERNAME || process.env.ADMIN_USER;
     const creds = await getAdminCredentials();
-    if (decoded && decoded.username === creds.username) {
+    const currentAdminUsername = envUsername || creds.username;
+    
+    if (decoded && decoded.username === currentAdminUsername) {
       return res.json({ valid: true, username: decoded.username });
     }
     return res.json({ valid: false });
@@ -515,6 +551,7 @@ app.post("/api/auth/update-credentials", authenticateAdmin, async (req, res) => 
       { $set: { username: creds.username, passwordHash: creds.passwordHash } },
       { upsert: true, new: true } as any
     );
+    writeJSON(AUTH_FILE, { username: creds.username, passwordHash: creds.passwordHash });
     return res.json({ success: true, message: "অ্যাডমিন ক্রেডেনশিয়ালস সফলভাবে পরিবর্তন করা হয়েছে।" });
   }
 
@@ -680,8 +717,10 @@ app.post("/api/posts/:id/view", async (req, res) => {
       const token = authHeader.split(" ")[1];
       try {
         const decoded = jwt.verify(token, JWT_SECRET) as { username: string };
+        const envUsername = process.env.ADMIN_USERNAME || process.env.ADMIN_USER;
         const creds = await getAdminCredentials();
-        if (decoded && decoded.username === creds.username) {
+        const currentAdminUsername = envUsername || creds.username;
+        if (decoded && decoded.username === currentAdminUsername) {
           isAdmin = true;
         }
       } catch {
