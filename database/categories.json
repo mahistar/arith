@@ -1,0 +1,32 @@
+[
+  {
+    "id": "cat-science-math",
+    "name": "বিজ্ঞান ও গণিত",
+    "englishName": "science-math",
+    "description": "বিজ্ঞান, মহাজাগতিক রহস্য, যুক্তিবিজ্ঞান এবং গণিত সংক্রান্ত আলোচনা ও প্রবন্ধ সমুহ।",
+    "color": "#F59E0B",
+    "icon": "Globe",
+    "order": 1,
+    "enabled": true
+  },
+  {
+    "id": "cat-philosophy-society",
+    "name": "দর্শন ও সমাজ",
+    "englishName": "philosophy-society",
+    "description": "সমাজ বিনির্মাণ, চিন্তাধারা, মনস্তাত্ত্বিক আলোচনা ও প্রাচীন-আধুনিক দর্শন নিয়ে বিশ্লেষণাত্মক নিবন্ধ।",
+    "color": "#3B82F6",
+    "icon": "Sparkles",
+    "order": 2,
+    "enabled": true
+  },
+  {
+    "id": "cat-history-culture",
+    "name": "ইতিহাস ও সংস্কৃতি",
+    "englishName": "history-culture",
+    "description": "ইতিহাসের হারিয়ে যাওয়া পাতা, সভ্যতা ও সংস্কৃতির বহুমাত্রিক দিক নিয়ে দীর্ঘ গবেষণা ও প্রবন্ধ।",
+    "color": "#10B981",
+    "icon": "BookOpen",
+    "order": 3,
+    "enabled": true
+  }
+]

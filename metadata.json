@@ -1,0 +1,6 @@
+{
+  "name": "Arithmetica",
+  "description": "অ্যারিথমেটিকা - একটি আধুনিক বাংলা ম্যাগাজিন ও ব্লগিং প্ল্যাটফর্ম যা বিজ্ঞান, দর্শন, ইতিহাস এবং সাহিত্য চর্চায় নিবেদিত।",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

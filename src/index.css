@@ -1,0 +1,73 @@
+@import "tailwindcss";
+
+@variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: "Hind Siliguri", "Inter", system-ui, -apple-system, sans-serif;
+  --font-serif: "Noto Serif Bengali", serif;
+  --font-mono: "JetBrains Mono", monospace;
+  
+  --color-accent-blue: #1e40af;
+  --color-accent-cyan: #06b6d4;
+  --color-brand-dark: #0f172a;
+}
+
+/* Custom styles for professional scrollbar and typography */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+.dark ::-webkit-scrollbar-track {
+  background: #0f172a;
+}
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+.dark ::-webkit-scrollbar-thumb {
+  background: #334155;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Typography styles for article reading content */
+.article-content p {
+  margin-bottom: 1.5rem;
+  line-height: 1.85;
+  font-size: 1.125rem;
+  text-align: justify;
+}
+
+.article-content h2 {
+  font-family: var(--font-serif);
+  font-weight: 700;
+  font-size: 1.75rem;
+  margin-top: 2rem;
+  margin-bottom: 1rem;
+  color: inherit;
+}
+
+.article-content h3 {
+  font-family: var(--font-serif);
+  font-weight: 600;
+  font-size: 1.4rem;
+  margin-top: 1.75rem;
+  margin-bottom: 0.75rem;
+  color: inherit;
+}
+
+.article-content blockquote {
+  border-left: 4px solid var(--color-accent-cyan);
+  padding-left: 1.25rem;
+  font-style: italic;
+  margin: 1.5rem 0;
+  opacity: 0.9;
+}
+
+/* Standard animation utility classes */
+.smooth-hover {
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
