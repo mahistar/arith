@@ -44,7 +44,13 @@ const COMMENTS_FILE = path.join(DATABASE_DIR, "comments.json");
 const SUBSCRIBERS_FILE = path.join(DATABASE_DIR, "subscribers.json");
 const NOTIFICATIONS_FILE = path.join(DATABASE_DIR, "notifications.json");
 const CONFIG_FILE = path.join(DATABASE_DIR, "site-config.json");
-const AUTH_FILE = path.join(DATABASE_DIR, "admin-auth.json");
+function getAuthFilePath(): string {
+  const adminPath = path.join(DATABASE_DIR, "Admin-auth.json");
+  if (fs.existsSync(adminPath)) {
+    return adminPath;
+  }
+  return path.join(DATABASE_DIR, "admin-auth.json");
+}
 
 function readJSON(filePath: string, fallback: any = []): any {
   try {
@@ -150,15 +156,15 @@ function isMongoConnected(): boolean {
   return mongoose.connection && mongoose.connection.readyState === 1;
 }
 
-function comparePasswords(plain: string, hashOrPlain: string): boolean {
+async function comparePasswords(plain: string, hashOrPlain: string): Promise<boolean> {
   if (typeof hashOrPlain !== "string") return false;
 
   const isHash = hashOrPlain.startsWith("$2a$") || hashOrPlain.startsWith("$2b$") || hashOrPlain.startsWith("$2y$");
   if (isHash) {
     try {
-      return bcrypt.compareSync(plain, hashOrPlain);
+      return await bcrypt.compare(plain, hashOrPlain);
     } catch (e) {
-      console.error("[AUTH] Bcrypt validation error:", e);
+      console.error("[AUTH] Bcrypt async comparison failed:", e);
       return false;
     }
   }
@@ -180,15 +186,12 @@ async function getAdminCredentials() {
   }
 
   try {
-    let backupAuth = readJSON(AUTH_FILE, null);
-    if (!backupAuth) {
-      const altPath = path.join(path.dirname(AUTH_FILE), "Admin-auth.json");
-      backupAuth = readJSON(altPath, null);
-    }
+    const authPath = getAuthFilePath();
+    const backupAuth = readJSON(authPath, null);
 
     if (backupAuth) {
-      const u = backupAuth.username || backupAuth.Username;
-      const p = backupAuth.passwordHash || backupAuth.PasswordHash;
+      const u = backupAuth.username || backupAuth.Username || backupAuth.user || backupAuth.User;
+      const p = backupAuth.passwordHash || backupAuth.PasswordHash || backupAuth.password || backupAuth.Password;
       if (u && p) {
         return {
           username: u,
@@ -201,7 +204,7 @@ async function getAdminCredentials() {
       const creds = await AdminAuthModel.findOne();
       if (creds) {
         const obj = creds.toObject();
-        writeJSON(AUTH_FILE, obj);
+        writeJSON(authPath, obj);
         const u = obj.username || obj.Username || "admin";
         const p = obj.passwordHash || obj.PasswordHash;
         return {
@@ -516,7 +519,7 @@ app.post("/api/auth/login", async (req, res) => {
   // Fallback to local files or database credentials
   if (!isValid) {
     const creds = await getAdminCredentials();
-    if (username === creds.username && comparePasswords(password, creds.passwordHash)) {
+    if (username === creds.username && await comparePasswords(password, creds.passwordHash)) {
       isValid = true;
     }
   }
@@ -562,7 +565,7 @@ app.post("/api/auth/update-credentials", authenticateAdmin, async (req, res) => 
   const creds = await getAdminCredentials();
 
   // Verify current password is correct
-  if (!comparePasswords(currentPassword, creds.passwordHash)) {
+  if (!await comparePasswords(currentPassword, creds.passwordHash)) {
     return res.status(401).json({ error: "বর্তমান পাসওয়ার্ডটি সঠিক নয়! পুনরায় চেষ্টা করুন।" });
   }
 
@@ -585,7 +588,7 @@ app.post("/api/auth/update-credentials", authenticateAdmin, async (req, res) => 
       { $set: { username: creds.username, passwordHash: creds.passwordHash } },
       { upsert: true, new: true } as any
     );
-    writeJSON(AUTH_FILE, { username: creds.username, passwordHash: creds.passwordHash });
+    writeJSON(getAuthFilePath(), { username: creds.username, passwordHash: creds.passwordHash });
     return res.json({ success: true, message: "অ্যাডমিন ক্রেডেনশিয়ালস সফলভাবে পরিবর্তন করা হয়েছে।" });
   }
 

@@ -326,9 +326,6 @@ export default function AdminDashboard({
         localStorage.setItem("arithmetica-is-authenticated", "true");
         setIsAuthenticated(true);
         setAuthError("");
-        if (typeof window !== "undefined") {
-          window.location.href = "/?view=admin";
-        }
       } else {
         setAuthError(data.error || "Incorrect username or password! Please try again.");
       }
@@ -341,9 +338,7 @@ export default function AdminDashboard({
     setIsAuthenticated(false);
     localStorage.removeItem("arithmetica-is-authenticated");
     localStorage.removeItem("arithmetica-jwt-token");
-    if (typeof window !== "undefined") {
-      window.location.href = "/";
-    }
+    onBackToHome();
   };
 
   const handleUpdateCredentialsSubmit = async (e: React.FormEvent) => {
